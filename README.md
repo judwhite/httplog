@@ -68,9 +68,16 @@ func main() {
 		WriteStdout: true,
 	})
 
-	svr := webServer{}
-	svr.FormatJSON = true
-	svr.ShutdownTimeout = 2 * time.Second
+	svr := webServer{
+		Server: httplog.Server{
+			FormatJSON:      true,
+			ShutdownTimeout: 2 * time.Second,
+			// tell httplog how we want new log entries created so it can use our
+			// custom formatters and be written to the correct destinations.
+			NewLogEntry: func() httplog.Entry { return log.NewEntry() },
+		},
+	}
+
 	go func() {
 		svr.Start()
 	}()
