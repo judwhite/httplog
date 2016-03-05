@@ -4,11 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sync/atomic"
 	"time"
-
-	log "github.com/judwhite/logrjack"
 )
 
 // Server provides functionality for:
@@ -32,6 +31,10 @@ type Server struct {
 	// formatted with MarshalIndent (when true) or Mashal (when false. The
 	// default is false.
 	FormatJSON bool
+	// NewLogEntry is a "func() Entry" field. Set this property to specify
+	// how new log entries are created. This field must be set to integrate
+	// with an outside logging package.
+	NewLogEntry func() Entry
 }
 
 // Entry is implemented by a log entry.
@@ -72,7 +75,7 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 		bytesSent := 0
 		status := 0
 		start := time.Now()
-		requestLogger := log.NewEntry()
+		requestLogger := svr.newEntry()
 
 		// stopped
 		if atomic.LoadInt32(&svr.stopped) == 1 {
@@ -154,20 +157,31 @@ func (svr *Server) Shutdown() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 loop:
 	for {
+		entry := svr.newEntry()
 		select {
 		case <-ticker.C:
 			conns := atomic.LoadInt32(&svr.openConnections)
 			if conns > 0 {
-				log.Infof("waiting for %d connections to close", conns)
+				entry.Infof("waiting for %d connections to close", conns)
 			} else {
-				log.Info("all connections closed")
+				entry.Info("all connections closed")
 				break loop
 			}
 		case <-deadline:
-			log.Errorf("stop deadline %v exceeded; aborting connections", deadlineTimeout)
+			entry.Errorf("stop deadline %v exceeded; aborting connections", deadlineTimeout)
 			break loop
 		}
 	}
+}
+
+func (svr *Server) newEntry() Entry {
+	newEntryFunc := svr.NewLogEntry
+	if newEntryFunc != nil {
+		return newEntryFunc()
+	}
+	log.Print("*** WARNING *** Set Server.NewLogEntry implementation to use your logging framework. Using fallback logger.")
+	svr.NewLogEntry = func() Entry { return &fallbackLogger{} }
+	return svr.newEntry()
 }
 
 // WriteHTTPLog writes the following keys to the log entry:
@@ -185,6 +199,8 @@ loop:
 //   status <= 200         Info
 //   400 <= status < 500   Warning
 //   status > 500          Error
+//
+// This function is invoked by Server's Handle method.
 func WriteHTTPLog(entry Entry, r *http.Request, start time.Time, status int, bytesSent int, err error) {
 	entry.AddFields(map[string]interface{}{
 		"bytes_sent":  bytesSent,
