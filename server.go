@@ -122,6 +122,7 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 					requestLogger.AddCallstack()
 					status = http.StatusInternalServerError
 				}
+				w.Header().Add("Content-Type", "application/json")
 			}
 
 			w.WriteHeader(status)
