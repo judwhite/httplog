@@ -1,7 +1,16 @@
 # httplog
-Structured, leveled logging for your HTTP server.
+Structured, leveled logging for your HTTP server. Returns structs as JSON and shuts down gracefully.
 
-Returns structs as JSON and performs clean shutdown.
+Wrapped up in a package so I don't need to copy this code over and over again.
+
+Graceful shutdown packages:
+- https://github.com/facebookgo/grace
+- https://github.com/tylerb/graceful
+
+Logging packages:
+- https://github.com/Sirupsen/logrus
+- https://github.com/natefinch/lumberjack
+- https://github.com/judwhite/logrjack
 
 # Example Log Output
 
@@ -26,6 +35,8 @@ time="2016-03-04T18:21:21-06:00" level=error msg="runtime error: integer divide 
 ```
 
 # Example
+
+Note: In practice you'd probably want to use a mux package such as https://github.com/gorilla/mux.
 
 ```go
 package main
@@ -171,4 +182,4 @@ func catchAllHandler(r *http.Request, log httplog.Entry) (interface{}, int, erro
 
 # License
 
-MIT.
+MIT
