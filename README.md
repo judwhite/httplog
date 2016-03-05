@@ -1,9 +1,9 @@
 # httplog
 Structured, leveled logging for your HTTP server.
 
-Returns structs as JSON, performs clean shutdown.
+Returns structs as JSON and performs clean shutdown.
 
-# Log Output
+# Example Log Output
 
 ```
 GET http://localhost:5678/ping
@@ -17,8 +17,8 @@ time="2016-03-04T18:17:30-06:00" level=info msg=OK bytes_sent=2 http_status=200 
 GET http://localhost:5678/add?a=1&b=badparam
 GET http://localhost:5678/wait
 
-time="2016-03-04T18:19:34-06:00" level=warning msg=OK bytes_sent=31 callstack="httplog_test/main.go:89, httplog/server.go:102" http_status=400 method=GET remote_addr="[::1]:55915" req_a=1 req_b=badparam time_taken=0 uri="/add?a=1&b=badparam"
-time="2016-03-04T18:20:29-06:00" level=warning msg=OK bytes_sent=23 callstack="httplog_test/main.go:128, httplog/server.go:102" http_status=400 method=GET remote_addr="[::1]:55915" time_taken=0 uri="/wait"
+time="2016-03-04T18:33:02-06:00" level=warning msg="strconv.ParseInt: parsing \"badparam\": invalid syntax" bytes_sent=31 callstack="httplog_test/main.go:89, httplog/server.go:102" http_status=400 method=GET remote_addr="[::1]:45908" req_a=1 req_b=badparam time_taken=0 uri="/add?a=1&b=badparam"
+time="2016-03-04T18:33:08-06:00" level=warning msg="strconv.ParseInt: parsing \"\": invalid syntax" bytes_sent=23 callstack="httplog_test/main.go:128, httplog/server.go:102" http_status=400 method=GET remote_addr="[::1]:45908" time_taken=0 uri="/wait"
 
 GET http://localhost:5678/panic
 
