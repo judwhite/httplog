@@ -108,12 +108,14 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 			} else if respBytes, ok := resp.([]byte); ok {
 				body = respBytes
 			} else {
+				var marshalErr error
 				if svr.FormatJSON {
-					body, err = json.MarshalIndent(resp, "", "  ")
+					body, marshalErr = json.MarshalIndent(resp, "", "  ")
 				} else {
-					body, err = json.Marshal(resp)
+					body, marshalErr = json.Marshal(resp)
 				}
-				if err != nil {
+				if marshalErr != nil {
+					err = fmt.Errorf("%s - json.Marshal:%s", err, marshalErr)
 					requestLogger.AddCallstack()
 					status = http.StatusInternalServerError
 				}
@@ -122,8 +124,9 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 			w.WriteHeader(status)
 
 			if body != nil {
-				_, err = w.Write(body)
-				if err != nil {
+				_, writeBodyErr := w.Write(body)
+				if writeBodyErr != nil {
+					err = fmt.Errorf("%s - w.Write:%s", err, writeBodyErr)
 					requestLogger.AddCallstack()
 				} else {
 					bytesSent = len(body)
