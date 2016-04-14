@@ -51,7 +51,20 @@ type Entry interface {
 }
 
 // LoggedHandler is the signature of the handler passed to the Handle method.
-type LoggedHandler func(r *http.Request, requestLogger Entry) (interface{}, int, error)
+type LoggedHandler func(r *http.Request, requestLogger Entry) (Response, error)
+
+// Response contains the body, status, and HTTP headers to return.
+type Response struct {
+	Body    interface{}
+	Status  int
+	Headers []Header
+}
+
+// Header contains the name/value pair of a response HTTP header.
+type Header struct {
+	Name  string
+	Value string
+}
 
 // Handle accepts a LoggedHandler and returns a function which
 // can be passed to http.HandleFunc.
@@ -102,7 +115,19 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 			atomic.AddInt32(&svr.openConnections, -1)
 		}()
 
-		resp, status, err := handler(r, requestLogger)
+		httpResponse, err := handler(r, requestLogger)
+
+		resp := httpResponse.Body
+		status = httpResponse.Status
+		headers := httpResponse.Headers
+
+		if status == 0 {
+			status = 200
+		}
+
+		for _, hdr := range headers {
+			w.Header().Add(hdr.Name, hdr.Value)
+		}
 
 		if resp != nil {
 			var body []byte
