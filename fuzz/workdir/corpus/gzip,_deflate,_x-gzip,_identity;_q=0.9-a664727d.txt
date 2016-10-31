@@ -1,0 +1,1 @@
+gzip, deflate, x-gzip, identity; q=0.9

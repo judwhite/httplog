@@ -1,0 +1,1 @@
+gzip, deflate, x-gzip, x-deflate
