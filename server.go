@@ -1,11 +1,20 @@
+// Package httplog provides common functionality for a web server, including:
+//
+//   - Structured logging
+//   - Panic handling
+//   - JSON marshalling
+//   - Waiting for processing requests to complete before shutdown
+//   - Optional Gzip compression
 package httplog
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -35,6 +44,7 @@ type Server struct {
 	// how new log entries are created. This field must be set to integrate
 	// with an outside logging package.
 	NewLogEntry func() Entry
+	DisableGzip bool
 }
 
 // Entry is implemented by a log entry.
@@ -147,19 +157,18 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 					requestLogger.AddCallstack()
 					status = http.StatusInternalServerError
 				}
-				w.Header().Add("Content-Type", "application/json")
+				if w.Header().Get("Content-Type") == "" {
+					w.Header().Add("Content-Type", "application/json")
+				}
 			}
 
-			w.WriteHeader(status)
+			writeBodyErr := svr.writeHeaderBody(w, r, status, body)
 
-			if body != nil {
-				_, writeBodyErr := w.Write(body)
-				if writeBodyErr != nil {
-					err = fmt.Errorf("%s - w.Write:%s", err, writeBodyErr)
-					requestLogger.AddCallstack()
-				} else {
-					bytesSent = len(body)
-				}
+			if writeBodyErr != nil {
+				err = fmt.Errorf("%s - w.Write:%s", err, writeBodyErr)
+				requestLogger.AddCallstack()
+			} else {
+				bytesSent = len(body)
 			}
 		} else {
 			w.WriteHeader(status)
@@ -181,6 +190,7 @@ func (svr *Server) Shutdown() {
 
 	deadline := time.After(deadlineTimeout)
 	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 loop:
 	for {
 		entry := svr.newEntry()
@@ -251,4 +261,120 @@ func WriteHTTPLog(entry Entry, r *http.Request, start time.Time, status int, byt
 	} else {
 		entry.Info(msg)
 	}
+}
+
+func (svr *Server) writeHeaderBody(w http.ResponseWriter, r *http.Request, status int, body []byte) error {
+	var err error
+
+	contentEncoding := w.Header().Get("Content-Encoding")
+	acceptEncoding := r.Header.Get("Accept-Encoding")
+	if len(body) < 150 || svr.DisableGzip || contentEncoding != "" || !acceptsGzip(acceptEncoding) {
+		w.WriteHeader(status)
+		if len(body) > 0 {
+			_, err = w.Write(body)
+		}
+		return err
+	}
+
+	gw, err := gzip.NewWriterLevel(w, gzip.DefaultCompression)
+	if err != nil {
+		return err
+	}
+	_, err = gw.Write(body)
+	return err
+}
+
+func acceptsGzip(acceptEncoding string) bool {
+	acceptEncoding = strings.TrimSpace(acceptEncoding)
+
+	// fast path for common Accept-Encoding strings
+	if len(acceptEncoding) == 0 {
+		return false
+	}
+	// examples:
+	//   gzip
+	//   deflate, gzip
+	//   gzip, deflate, sdch, br
+	//   gzip, deflate, br
+	//   gzip, deflate
+	/*if strings.Contains(acceptEncoding, "gzip,") || strings.HasSuffix(acceptEncoding, "gzip") {
+		return true
+	}
+	if !strings.Contains(acceptEncoding, "gzip") {
+		return false
+	}*/
+
+	j := 0
+	for i := 0; i < len(acceptEncoding); i++ {
+		if acceptEncoding[i] == ',' || i == len(acceptEncoding)-1 {
+			if i == len(acceptEncoding)-1 {
+				i++
+			}
+			k := j
+			skipSpaces := func() {
+				for ; k < i && acceptEncoding[k] == ' '; k++ {
+				}
+			}
+			skipSpaces()
+			if k+4 > i {
+				return false
+			}
+			j = i + 1
+			if acceptEncoding[k:k+4] != "gzip" {
+				//log.Printf("! %q\n", acceptEncoding[k:k+4])
+				continue
+			}
+			if k+4 == i {
+				//log.Printf("OK! %q %d %d\n", acceptEncoding, k, i)
+				return true
+			}
+			k += 4
+			skipSpaces()
+			if acceptEncoding[k] == ',' {
+				return true
+			}
+			if acceptEncoding[k] != ';' {
+				return false
+			}
+			k++
+			skipSpaces()
+			if k+2 >= i {
+				return false
+			}
+			if acceptEncoding[k] != 'q' || acceptEncoding[k+1] != '=' {
+				return false
+			}
+			k += 2
+			for ; k < i; k++ {
+				if acceptEncoding[k] != '0' && acceptEncoding[k] != '.' {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
+
+	/*loop:
+	for _, val := range strings.Split(acceptEncoding, ",") {
+		for i, part := range strings.Split(val, ";") {
+			part = strings.TrimSpace(part)
+			if i == 0 {
+				if part != "gzip" {
+					continue loop
+				}
+			} else {
+				if strings.HasPrefix(part, "q=") {
+					for j := 2; j < len(part); j++ {
+						if part[j] != '0' && part[j] != '.' {
+							return true
+						}
+					}
+					return false
+				}
+			}
+		}
+		return true
+	}
+	return false*/
 }

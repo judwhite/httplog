@@ -17,7 +17,7 @@ func (e *fallbackLogger) AddField(key string, value interface{}) {
 	if e.msg != "" {
 		e.msg += " "
 	}
-	e.msg += fmt.Sprintf("%s=\"%v\"", key, value)
+	e.msg += fmt.Sprintf("%s=%q", key, value)
 }
 
 func (e *fallbackLogger) AddFields(fields map[string]interface{}) {
