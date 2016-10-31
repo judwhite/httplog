@@ -104,9 +104,21 @@ func TestAcceptsGzip(t *testing.T) {
 		{input: "identity;q=1, *;q=0", expected: false},
 		{input: "sdch", expected: false},
 		{input: "x-gzip, gzip, deflate", expected: true},
+		{input: "gzips   ,", expected: false},
+		{input: "gzip   ,", expected: true},
+		{input: "gzip;Q=1", expected: false},
+		{input: "gzip;q:1", expected: false},
+		{input: "gzi", expected: false},
+		{input: "gzi,", expected: false},
+		{input: "gzi,br", expected: false},
+		{input: "gzi,br,", expected: false},
+		{input: "gzi,br;q=1,", expected: false},
+		{input: "br;q=1,gzip", expected: true},
+		{input: "br;q=1,gzip;q=0", expected: false},
+		{input: "gzip          s", expected: false},
 	}
 
-	dir := "fuzz/workdir/corpus"
+	dir := "fuzz/corpus"
 
 	if err := os.MkdirAll(dir, 0666); err != nil {
 		t.Fatal(err)
@@ -120,21 +132,19 @@ func TestAcceptsGzip(t *testing.T) {
 			t.Fatal(err)
 		}
 		filename := []byte(c.input)
-		if len(filename) == 0 {
-			filename = []byte("empty")
-		}
-		for i := 0; i < len(filename); i++ {
-			for j := 0; j < len(illegalChars); j++ {
-				if filename[i] == illegalChars[j] || filename[i] < 32 || filename[i] > 127 {
-					filename[i] = '_'
+		if len(filename) != 0 {
+			for i := 0; i < len(filename); i++ {
+				for j := 0; j < len(illegalChars); j++ {
+					if filename[i] == illegalChars[j] || filename[i] < 32 || filename[i] > 127 {
+						filename[i] = '_'
+					}
 				}
 			}
-		}
-		fullPath := path.Join(dir, string(filename)) + fmt.Sprintf("-%x.txt", h.Sum32())
-		t.Log(fullPath)
+			fullPath := path.Join(dir, string(filename)) + fmt.Sprintf("-%x.txt", h.Sum32())
 
-		if err := ioutil.WriteFile(fullPath, []byte(c.input), 0666); err != nil {
-			t.Log(err)
+			if err := ioutil.WriteFile(fullPath, []byte(c.input), 0666); err != nil {
+				t.Log(err)
+			}
 		}
 
 		actual := acceptsGzip(c.input)
