@@ -5,12 +5,18 @@ import (
 	"log"
 	"runtime"
 	"strings"
+
+	"github.com/pkg/errors"
 )
 
 // fallbackLogger is used if Server.NewLogEntry is not set. It's not meant to
 // be particularly good. README.md contains an example of settings this up.
 type fallbackLogger struct {
 	msg string
+}
+
+type stackTracer interface {
+	StackTrace() errors.StackTrace
 }
 
 func (e *fallbackLogger) AddField(key string, value interface{}) {
@@ -41,6 +47,15 @@ func (e *fallbackLogger) AddCallstack() {
 		cs = append(cs, fmt.Sprintf("%s:%d", file, line))
 	}
 	e.AddField("callstack", strings.Join(cs, ", "))
+}
+
+func (e *fallbackLogger) AddError(err error) {
+	if cause, ok := errors.Cause(err).(stackTracer); ok {
+		e.AddField("err", err)
+		e.AddField("err_stacktrace", cause.StackTrace())
+	} else {
+		e.AddField("err", err)
+	}
 }
 
 func (e *fallbackLogger) Info(args ...interface{}) {
