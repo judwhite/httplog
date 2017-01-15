@@ -2,12 +2,18 @@ package httplog
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"net"
+
+	"strings"
+	"sync"
+
+	"github.com/pkg/errors"
 )
 
 // Server provides functionality for:
@@ -41,7 +47,7 @@ type Server struct {
 type Entry interface {
 	AddField(key string, value interface{})
 	AddFields(fields map[string]interface{})
-	AddCallstack()
+	AddError(err error)
 	Info(args ...interface{})
 	Infof(format string, args ...interface{})
 	Warn(args ...interface{})
@@ -101,15 +107,17 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 		atomic.AddInt32(&svr.openConnections, 1)
 
 		defer func() {
-			perr := recover()
-			if perr != nil {
+			if perr := recover(); perr != nil {
 				status = http.StatusInternalServerError
 				w.WriteHeader(status)
-				requestLogger.AddCallstack()
+
 				perror, ok := perr.(error)
 				if !ok {
 					perror = fmt.Errorf("%v", perr)
 				}
+
+				perror = errors.WithStack(perror)
+
 				WriteHTTPLog(requestLogger, r, start, status, bytesSent, perror)
 			}
 			atomic.AddInt32(&svr.openConnections, -1)
@@ -143,11 +151,15 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 					body, marshalErr = json.Marshal(resp)
 				}
 				if marshalErr != nil {
-					err = fmt.Errorf("%s - json.Marshal:%s", err, marshalErr)
-					requestLogger.AddCallstack()
+					if err != nil {
+						err = errors.Wrap(err, fmt.Sprintf("json.Marshal:%s", marshalErr))
+					} else {
+						err = errors.Wrap(marshalErr, "json.Marshal")
+					}
 					status = http.StatusInternalServerError
+				} else {
+					w.Header().Add("Content-Type", "application/json")
 				}
-				w.Header().Add("Content-Type", "application/json")
 			}
 
 			w.WriteHeader(status)
@@ -155,8 +167,11 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 			if body != nil {
 				_, writeBodyErr := w.Write(body)
 				if writeBodyErr != nil {
-					err = fmt.Errorf("%s - w.Write:%s", err, writeBodyErr)
-					requestLogger.AddCallstack()
+					if err != nil {
+						err = errors.Wrap(err, fmt.Sprintf("http.ResponseWriter.Write:%s", writeBodyErr))
+					} else {
+						err = errors.Wrap(writeBodyErr, "http.ResponseWriter.Write")
+					}
 				} else {
 					bytesSent = len(body)
 				}
@@ -165,11 +180,11 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 			w.WriteHeader(status)
 		}
 
-		WriteHTTPLog(requestLogger, r, start, status, bytesSent, err)
+		go WriteHTTPLog(requestLogger, r, start, status, bytesSent, err)
 	}
 }
 
-// Shutdown attempst a graceful shutdown, waiting for outstanding connections
+// Shutdown attempts a graceful shutdown, waiting for outstanding connections
 // to complete. See ShutdownTimeout.
 func (svr *Server) Shutdown() {
 	atomic.StoreInt32(&svr.stopped, 1)
@@ -222,33 +237,72 @@ func (svr *Server) newEntry() Entry {
 //
 // The log level is determined by the status code:
 //
-//   status <= 200         Info
+//   status < 400          Info
 //   400 <= status < 500   Warning
-//   status > 500          Error
+//   status >= 500         Error
 //
 // This function is invoked by Server's Handle method.
 func WriteHTTPLog(entry Entry, r *http.Request, start time.Time, status int, bytesSent int, err error) {
+	timeTaken := int64(time.Since(start) / time.Millisecond)
+
+	var host string
+	ip, _, splitErr := net.SplitHostPort(r.RemoteAddr)
+	if splitErr != nil {
+		ip = r.RemoteAddr
+		host = r.RemoteAddr
+	} else {
+		host = getHostFromIP(ip)
+	}
+
 	entry.AddFields(map[string]interface{}{
-		"bytes_sent":  bytesSent,
 		"http_status": status,
 		"method":      r.Method,
-		"remote_addr": r.RemoteAddr,
-		"time_taken":  int64(time.Since(start) / time.Millisecond),
 		"uri":         r.RequestURI,
+		"bytes_sent":  bytesSent,
+		"ip":          ip,
+		"host":        host,
+		"time_taken":  timeTaken,
 	})
 
-	var msg string
+	msg := http.StatusText(status)
 	if err != nil {
-		msg = err.Error()
-	} else {
-		msg = "OK"
+		entry.AddError(err)
 	}
 
 	if status >= 400 && status < 500 {
 		entry.Warn(msg)
-	} else if status >= 500 || err != nil {
+	} else if status >= 500 {
 		entry.Error(msg)
 	} else {
 		entry.Info(msg)
 	}
+}
+
+var ipHost map[string]string
+var ipHostMtx sync.RWMutex
+
+func init() {
+	ipHost = make(map[string]string)
+}
+
+// GetHostFromAddress gets a host name from an IPv4 address
+func getHostFromIP(ip string) string {
+	ipHostMtx.RLock()
+	entry, ok := ipHost[ip]
+	ipHostMtx.RUnlock()
+
+	if !ok {
+		names, lookupErr := net.LookupAddr(ip)
+		if lookupErr != nil || len(names) == 0 {
+			entry = ip
+		} else {
+			entry = strings.TrimSuffix(names[0], ".")
+		}
+
+		ipHostMtx.Lock()
+		ipHost[ip] = entry
+		ipHostMtx.Unlock()
+	}
+
+	return entry
 }

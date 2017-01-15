@@ -3,20 +3,15 @@ package httplog
 import (
 	"fmt"
 	"log"
-	"runtime"
 	"strings"
-
-	"github.com/pkg/errors"
 )
+
+var logPrint = log.Print
 
 // fallbackLogger is used if Server.NewLogEntry is not set. It's not meant to
 // be particularly good. README.md contains an example of settings this up.
 type fallbackLogger struct {
 	msg string
-}
-
-type stackTracer interface {
-	StackTrace() errors.StackTrace
 }
 
 func (e *fallbackLogger) AddField(key string, value interface{}) {
@@ -32,29 +27,16 @@ func (e *fallbackLogger) AddFields(fields map[string]interface{}) {
 	}
 }
 
-func (e *fallbackLogger) AddCallstack() {
-	var cs []string
-	for i := 0; ; i++ {
-		file, line := getCaller(2 + i)
-		if file == "???" {
-			break
-		}
-		if strings.HasSuffix(file, ".s") ||
-			strings.HasPrefix(file, "http/server.go") ||
-			strings.HasPrefix(file, "runtime/proc.go") {
-			continue
-		}
-		cs = append(cs, fmt.Sprintf("%s:%d", file, line))
-	}
-	e.AddField("callstack", strings.Join(cs, ", "))
-}
-
 func (e *fallbackLogger) AddError(err error) {
-	if cause, ok := errors.Cause(err).(stackTracer); ok {
-		e.AddField("err", err)
-		e.AddField("err_stacktrace", cause.StackTrace())
-	} else {
-		e.AddField("err", err)
+	e.AddField("err", err)
+
+	var cs []string
+	for _, frame := range StackTrace(err) {
+		cs = append(cs, fmt.Sprintf("%s:%s:%d", frame.File(), frame.Func(), frame.Line()))
+	}
+
+	if len(cs) > 0 {
+		e.AddField("stacktrace", strings.Join(cs, ", "))
 	}
 }
 
@@ -93,28 +75,5 @@ func (e *fallbackLogger) Write(level, format string, args ...interface{}) {
 		msg += " "
 	}
 	msg += e.msg
-	log.Print(msg)
-}
-
-func getCaller(skip int) (file string, line int) {
-	var ok bool
-	_, file, line, ok = runtime.Caller(skip)
-	if !ok {
-		file = "???"
-		line = 0
-	} else {
-		short := file
-		count := 0
-		for i := len(file) - 1; i > 0; i-- {
-			if file[i] == '/' {
-				count++
-				if count == 2 {
-					short = file[i+1:]
-					break
-				}
-			}
-		}
-		file = short
-	}
-	return
+	logPrint(msg)
 }
