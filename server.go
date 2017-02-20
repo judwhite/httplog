@@ -4,14 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
-	"sync/atomic"
-	"time"
-
 	"net"
-
+	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/pkg/errors"
 )
@@ -34,7 +33,7 @@ type Server struct {
 	// to complete before the Shutdown method returns. The default is 30s.
 	ShutdownTimeout time.Duration
 	// FormatJSON determines whether non-byte and non-string responses are
-	// formatted with MarshalIndent (when true) or Mashal (when false. The
+	// formatted with MarshalIndent (when true) or Marshal (when false. The
 	// default is false.
 	FormatJSON bool
 	// NewLogEntry is a "func() Entry" field. Set this property to specify
@@ -56,8 +55,13 @@ type Entry interface {
 	Errorf(format string, args ...interface{})
 }
 
-// LoggedHandler is the signature of the handler passed to the Handle method.
-type LoggedHandler func(r *http.Request, requestLogger Entry) (Response, error)
+// Handler contains the handler name and handler function.
+type Handler struct {
+	Name string
+	Func loggedHandler
+}
+
+type loggedHandler func(r *http.Request, requestLogger Entry) (Response, error)
 
 // Response contains the body, status, and HTTP headers to return.
 type Response struct {
@@ -72,39 +76,32 @@ type Header struct {
 	Value string
 }
 
-// Handle accepts a LoggedHandler and returns a function which
+// Handle accepts a Handler and returns a function which
 // can be passed to http.HandleFunc.
 //
 // If the Shutdown method has been called Handle responds with
 // StatusServiceUnavailable (503).
 //
-// If the LoggedHandler panics it's recovered and the server responds with
+// If the Handler panics it's recovered and the server responds with
 // StatusInternalServerError (500). The callstack is also captured and added
 // to the log.
 //
-// If the response from the LoggedHandler is a type other than string or
+// If the response from Handler is a type other than string or
 // []byte the object is serialized as JSON. See the FormatJSON field.
 //
-// Returning an error from LoggedHandler does not modify the status code. The
+// Returning an error from Handler does not modify the status code. The
 // error itself will be written to the log.
 //
 // After the response has been written to the client WriteHTTPLog is called.
-func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *http.Request) {
+func (svr *Server) Handle(handler Handler) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		bytesSent := 0
 		status := 0
 		start := time.Now()
 		requestLogger := svr.newEntry()
 
-		// stopped
-		if atomic.LoadInt32(&svr.stopped) == 1 {
-			status = http.StatusServiceUnavailable
-			w.WriteHeader(status)
-			WriteHTTPLog(requestLogger, r, start, status, bytesSent, errors.New("server shutting down"))
-			return
-		}
-
-		atomic.AddInt32(&svr.openConnections, 1)
+		var decOpenConnections bool
+		var err error
 
 		defer func() {
 			if perr := recover(); perr != nil {
@@ -116,14 +113,26 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 					perror = fmt.Errorf("%v", perr)
 				}
 
-				perror = errors.WithStack(perror)
-
-				WriteHTTPLog(requestLogger, r, start, status, bytesSent, perror)
+				err = errors.WithStack(perror)
 			}
-			atomic.AddInt32(&svr.openConnections, -1)
+
+			go WriteHTTPLog(handler.Name, requestLogger, r, start, status, bytesSent, err)
+
+			if decOpenConnections {
+				atomic.AddInt32(&svr.openConnections, -1)
+			}
 		}()
 
-		httpResponse, err := handler(r, requestLogger)
+		// stopped
+		if atomic.LoadInt32(&svr.stopped) == 1 {
+			status = http.StatusServiceUnavailable
+			return
+		}
+
+		decOpenConnections = true
+		atomic.AddInt32(&svr.openConnections, 1)
+
+		httpResponse, err := handler.Func(r, requestLogger)
 
 		resp := httpResponse.Body
 		status = httpResponse.Status
@@ -179,8 +188,6 @@ func (svr *Server) Handle(handler LoggedHandler) func(w http.ResponseWriter, r *
 		} else {
 			w.WriteHeader(status)
 		}
-
-		go WriteHTTPLog(requestLogger, r, start, status, bytesSent, err)
 	}
 }
 
@@ -209,7 +216,10 @@ loop:
 				break loop
 			}
 		case <-deadline:
-			entry.Errorf("stop deadline %v exceeded; aborting connections", deadlineTimeout)
+			conns := atomic.LoadInt32(&svr.openConnections)
+			if conns > 0 {
+				entry.Errorf("stop deadline %v exceeded; aborting %d connections", deadlineTimeout, conns)
+			}
 			break loop
 		}
 	}
@@ -242,8 +252,14 @@ func (svr *Server) newEntry() Entry {
 //   status >= 500         Error
 //
 // This function is invoked by Server's Handle method.
-func WriteHTTPLog(entry Entry, r *http.Request, start time.Time, status int, bytesSent int, err error) {
-	timeTaken := int64(time.Since(start) / time.Millisecond)
+func WriteHTTPLog(handlerName string, entry Entry, r *http.Request, start time.Time, status int, bytesSent int, err error) {
+	timeTakenSecs := float64(time.Since(start)) / 1e9
+
+	labelValues := []string{strconv.Itoa(status), handlerName, r.Method}
+	httpRequestsTotal.WithLabelValues(labelValues...).Inc()
+	httpRequestDurationCounter.WithLabelValues(labelValues...).Observe(float64(timeTakenSecs))
+	httpRequestSizeBytes.WithLabelValues(labelValues...).Observe(float64(r.ContentLength))
+	httpResponseSizeBytes.WithLabelValues(labelValues...).Observe(float64(bytesSent))
 
 	var host string
 	ip, _, splitErr := net.SplitHostPort(r.RemoteAddr)
@@ -261,7 +277,7 @@ func WriteHTTPLog(entry Entry, r *http.Request, start time.Time, status int, byt
 		"bytes_sent":  bytesSent,
 		"ip":          ip,
 		"host":        host,
-		"time_taken":  timeTaken,
+		"time_taken":  int64(timeTakenSecs * 1000),
 	})
 
 	msg := http.StatusText(status)
