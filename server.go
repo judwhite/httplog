@@ -238,11 +238,11 @@ func (svr *Server) newEntry() Entry {
 // WriteHTTPLog writes the following keys to the log entry:
 //
 //   bytes_sent           The number of bytes sent in the HTTP response body.
+//   host                 The remote host name. If the host name cannot be resolved, IP is repeated here.
 //   http_status          The HTTP status code returned.
+//   ip                   The remote IP address.
 //   method               GET, POST, PUT, DELETE, etc
-//   remote_addr          The remote IP address.
-//   time_taken           The time taken to complete the request in milliseconds,
-//                        including writing to the client.
+//   time_taken           The time taken to complete the request in milliseconds, including writing to the client.
 //   uri                  The request URI.
 //
 // The log level is determined by the status code:
@@ -258,8 +258,6 @@ func WriteHTTPLog(handlerName string, entry Entry, r *http.Request, start time.T
 	labelValues := []string{strconv.Itoa(status), handlerName, r.Method}
 	httpRequestsTotal.WithLabelValues(labelValues...).Inc()
 	httpRequestDurationCounter.WithLabelValues(labelValues...).Observe(float64(timeTakenSecs))
-	httpRequestSizeBytes.WithLabelValues(labelValues...).Observe(float64(r.ContentLength))
-	httpResponseSizeBytes.WithLabelValues(labelValues...).Observe(float64(bytesSent))
 
 	var host string
 	ip, _, splitErr := net.SplitHostPort(r.RemoteAddr)
@@ -271,13 +269,13 @@ func WriteHTTPLog(handlerName string, entry Entry, r *http.Request, start time.T
 	}
 
 	entry.AddFields(map[string]interface{}{
-		"http_status": status,
-		"method":      r.Method,
-		"uri":         r.RequestURI,
 		"bytes_sent":  bytesSent,
-		"ip":          ip,
 		"host":        host,
+		"http_status": status,
+		"ip":          ip,
+		"method":      r.Method,
 		"time_taken":  int64(timeTakenSecs * 1000),
+		"uri":         r.RequestURI,
 	})
 
 	msg := http.StatusText(status)
