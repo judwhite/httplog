@@ -73,7 +73,7 @@ func recoverPanic(f func()) (got string) {
 func TestPanic(t *testing.T) {
 	const want = `[error] panic recover err="EOF" stacktrace="` +
 		`github.com/judwhite/httplog/fallbackLogger_test.go:recoverPanic.func2:59, ` +
-		`runtime/panic.go:gopanic:458, ` +
+		`runtime/panic.go:gopanic:489, ` +
 		`github.com/judwhite/httplog/fallbackLogger_helpers_test.go:cPanic:15, ` +
 		`github.com/judwhite/httplog/fallbackLogger_helpers_test.go:bPanic:14, ` +
 		`github.com/judwhite/httplog/fallbackLogger_helpers_test.go:aPanic:13, ` +
@@ -90,7 +90,7 @@ func TestPanic(t *testing.T) {
 func TestWrappedPanic(t *testing.T) {
 	const want = `[error] panic recover err="unexpected eof: EOF" stacktrace="` +
 		`github.com/judwhite/httplog/fallbackLogger_test.go:recoverPanic.func2:59, ` +
-		`runtime/panic.go:gopanic:458, ` +
+		`runtime/panic.go:gopanic:489, ` +
 		`github.com/judwhite/httplog/fallbackLogger_helpers_test.go:cPanicWrapped:19, ` +
 		`github.com/judwhite/httplog/fallbackLogger_helpers_test.go:bPanicWrapped:18, ` +
 		`github.com/judwhite/httplog/fallbackLogger_helpers_test.go:aPanicWrapped:17, ` +
