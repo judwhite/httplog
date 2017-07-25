@@ -257,7 +257,7 @@ func WriteHTTPLog(handlerName string, entry Entry, r *http.Request, start time.T
 
 	labelValues := []string{strconv.Itoa(status), handlerName, r.Method}
 	httpRequestsTotal.WithLabelValues(labelValues...).Inc()
-	httpRequestDurationCounter.WithLabelValues(labelValues...).Observe(float64(timeTakenSecs))
+	httpRequestDurationCounter.WithLabelValues(labelValues...).Observe(timeTakenSecs)
 
 	var host string
 	ip, _, splitErr := net.SplitHostPort(r.RemoteAddr)
