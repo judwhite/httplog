@@ -30,9 +30,21 @@ func (e *fallbackLogger) AddFields(fields map[string]interface{}) {
 func (e *fallbackLogger) AddError(err error) {
 	e.AddField("err", err)
 
+	var st []frame
+
+	if errStack, ok := err.(*errorStack); ok {
+		st = errStack.StackTrace()
+	} else {
+		st = stackTrace()
+		if len(st) < 2 {
+			return
+		}
+		st = st[1:]
+	}
+
 	var cs []string
-	for _, frame := range StackTrace(err) {
-		cs = append(cs, fmt.Sprintf("%s:%s:%d", frame.File(), frame.Func(), frame.Line()))
+	for _, frame := range st {
+		cs = append(cs, fmt.Sprintf("%s:%s:%d", frame.Path(), frame.Func(), frame.Line()))
 	}
 
 	if len(cs) > 0 {
