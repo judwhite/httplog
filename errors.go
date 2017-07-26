@@ -1,144 +1,223 @@
 package httplog
 
 import (
-	"strings"
-
 	"fmt"
-	"strconv"
-
-	"github.com/pkg/errors"
+	"runtime"
+	"strings"
 )
 
-type stackTracer interface {
-	StackTrace() errors.StackTrace
-}
-
-type causer interface {
-	Cause() error
-}
-
-// FilterStackTrace is called by the StackTrace function to filter frames.
+// FilterStackTrace is called by the stackTrace function to filter frames.
 // This variable can be set to a custom function.
-var FilterStackTrace = func(filename string) bool {
-	return strings.HasSuffix(filename, ".s") ||
-		strings.HasPrefix(filename, "http/server.go") ||
-		strings.HasPrefix(filename, "runtime/proc.go") ||
-		filename == "testing/testing.go"
+var FilterStackTrace = func(path string) bool {
+	return strings.HasSuffix(path, ".s") ||
+		strings.HasPrefix(path, "http/server.go") ||
+		strings.HasPrefix(path, "runtime/proc.go") ||
+		path == "testing/testing.go"
 }
 
-// Frame contains information about a stack trace frame.
-type Frame interface {
-	File() string
-	Func() string
-	Line() int
-}
+// The code in this file is heavily based on http://github.com/pkg/errors, with modifications.
 
-type frame struct {
-	file     string
-	funcname string
-	line     int
-}
+// Persuant to the BSD 2-clause "Simplified" License of pkg/errors the license is replicated here:
 
-func (f frame) File() string {
-	return f.file
-}
+// Copyright (c) 2015, Dave Cheney <dave@cheney.net>
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//
+// * Redistributions of source code must retain the above copyright notice, this
+//   list of conditions and the following disclaimer.
+//
+// * Redistributions in binary form must reproduce the above copyright notice,
+//   this list of conditions and the following disclaimer in the documentation
+//   and/or other materials provided with the distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-func (f frame) Func() string {
-	return f.funcname
-}
-
-func (f frame) Line() int {
-	return f.line
-}
-
-func getFrame(errorsFrame errors.Frame) Frame {
-	if f, ok := interface{}(errorsFrame).(Frame); ok {
-		return f
+// stackTrace returns the current frames in the program's stack.
+func stackTrace() []frame {
+	stackTrace := callers().StackTrace()
+	filtered := make([]frame, 0, len(stackTrace))
+	for _, frame := range stackTrace {
+		if !FilterStackTrace(frame.Path()) {
+			filtered = append(filtered, frame)
+		}
 	}
-
-	// support versions of pkg/errors which don't have File/Func/Line methods
-	// basically parse it out of the text :/ waiting for https://github.com/pkg/errors/pull/100 to land
-
-	// line number
-	lineStr := fmt.Sprintf("%d", errorsFrame)
-	line, err := strconv.Atoi(lineStr)
-	if err != nil {
-		line = 0
-	}
-
-	output := fmt.Sprintf("%+v", errorsFrame)
-
-	parts := strings.Split(output, "\n")
-	if len(parts) != 2 {
-		return nil
-	}
-
-	// func name
-	slashIndex := strings.LastIndex(parts[0], "/")
-	funcname := parts[0][slashIndex+1:]
-	dotIndex := strings.Index(funcname, ".")
-	if dotIndex == -1 {
-		return nil
-	}
-	funcname = funcname[dotIndex+1:]
-
-	// file name
-	file := strings.Trim(parts[1], "\n\r\t")
-	srcIndex := strings.Index(file, "/src/")
-	if srcIndex == -1 {
-		return nil
-	}
-	file = file[srcIndex+5:]
-	colonIndex := strings.LastIndex(file, ":")
-	if colonIndex != -1 {
-		file = file[:colonIndex]
-	}
-
-	return frame{file, funcname, line}
+	return filtered
 }
 
-// StackTrace returns the stack frames of an error created by github.com/pkg/errors.
-// This function calls httplog.FilterStackTrace to filter frames.
-func StackTrace(err error) []Frame {
+func withStack(err error) error {
+	return withStackSkip(err, 2)
+}
+
+func withStackSkip(err error, skip int) error {
 	if err == nil {
 		return nil
 	}
-
-	var stackTrace []Frame
-	if st, ok := err.(stackTracer); ok {
-		for _, frame := range st.StackTrace() {
-			f := getFrame(frame)
-			if f != nil {
-				filename := f.File()
-				if FilterStackTrace(filename) {
-					continue
-				}
-				stackTrace = append(stackTrace, f)
+	if e, ok := err.(*errorStack); ok {
+		stackTrace := stackTrace()[skip:]
+		first := stackTrace[0]
+		firstPath, firstLine := first.Path(), first.Line()
+		for _, st := range e.stackTrace {
+			if st.Path() == firstPath && st.Line() == firstLine {
+				return err
 			}
 		}
+		e.stackTrace = stackTrace
+		return e
 	}
+	e := errorStack{}
+	e.message = err.Error()
+	e.orig = err
+	e.stackTrace = stackTrace()[skip:]
+	return &e
+}
 
-	if cause, ok := err.(causer); ok {
-		st := StackTrace(cause.Cause())
+func wrap(err error, message string) error {
+	e := withStackSkip(err, 2)
+	if e == nil {
+		return nil
+	}
+	errstack, ok := e.(*errorStack)
+	if !ok {
+		// this shouldn't happen
+		return e
+	}
+	errstack.message = fmt.Sprintf("%s: %s", message, errstack.message)
+	return e
+}
 
-		if len(st) >= len(stackTrace) {
-			// remove duplicate stack traces caused by multiple calls to Wrap/WithStack
-			diff := false
-			for i, j := len(st)-1, len(stackTrace)-1; j >= 0; {
-				if st[i].File() != stackTrace[j].File() || st[i].Line() != stackTrace[j].Line() {
-					diff = true
-					break
-				}
-				i--
-				j--
-			}
-			if diff {
-				stackTrace = append(stackTrace, st...)
-			} else {
-				stackTrace = st
-			}
+type errorStack struct {
+	message    string
+	stackTrace []frame
+	orig       error
+}
+
+func (e *errorStack) Error() string {
+	return e.message
+}
+
+func (e *errorStack) StackTrace() []frame {
+	return e.stackTrace
+}
+
+func (e *errorStack) Orig() error {
+	return e.orig
+}
+
+// frame represents a program counter inside a stack frame.
+type frame uintptr
+
+// pc returns the program counter for this frame;
+// multiple frames may have the same PC value.
+func (f frame) pc() uintptr { return uintptr(f) - 1 }
+
+// Path returns the path to the file relative to GOPATH
+// that contains the function for this frame's pc.
+func (f frame) Path() string {
+	fn := runtime.FuncForPC(f.pc())
+	if fn == nil {
+		return "unknown"
+	}
+	file, _ := fn.FileLine(f.pc())
+	return trimGOPATH(fn.Name(), file)
+}
+
+// Func returns the function name.
+func (f frame) Func() string {
+	name := runtime.FuncForPC(f.pc()).Name()
+	// remove the path prefix component of a function's name
+	i := strings.LastIndex(name, "/")
+	name = name[i+1:]
+	i = strings.Index(name, ".")
+	return name[i+1:]
+}
+
+// Filename returns the filename without the path
+// that contains the function for this frame's pc.
+func (f frame) Filename() string {
+	filename := f.Path()
+	if strings.Contains(filename, "/") {
+		lastidx := strings.LastIndex(filename, "/")
+		filename = filename[lastidx+1:]
+	}
+	return filename
+}
+
+// Line returns the line number of source code of the
+// function for this frame's pc.
+func (f frame) Line() int {
+	fn := runtime.FuncForPC(f.pc())
+	if fn == nil {
+		return 0
+	}
+	_, line := fn.FileLine(f.pc())
+	return line
+}
+
+type stack []uintptr
+
+func callers() *stack {
+	const depth = 32
+	var pcs [depth]uintptr
+	n := runtime.Callers(3, pcs[:])
+	var st stack = pcs[0:n]
+	return &st
+}
+
+func (s *stack) StackTrace() []frame {
+	f := make([]frame, len(*s))
+	for i := 0; i < len(f); i++ {
+		f[i] = frame((*s)[i])
+	}
+	return f
+}
+
+func trimGOPATH(name, file string) string {
+	// Here we want to get the source file path relative to the compile time
+	// GOPATH. As of Go 1.6.x there is no direct way to know the compiled
+	// GOPATH at runtime, but we can infer the number of path segments in the
+	// GOPATH. We note that fn.Name() returns the function name qualified by
+	// the import path, which does not include the GOPATH. Thus we can trim
+	// segments from the beginning of the file path until the number of path
+	// separators remaining is one more than the number of path separators in
+	// the function name. For example, given:
+	//
+	//    GOPATH     /home/user
+	//    file       /home/user/src/pkg/sub/file.go
+	//    fn.Name()  pkg/sub.Type.Method
+	//
+	// We want to produce:
+	//
+	//    pkg/sub/file.go
+	//
+	// From this we can easily see that fn.Name() has one less path separator
+	// than our desired output. We count separators from the end of the file
+	// path until it finds two more than in the function name and then move
+	// one character forward to preserve the initial path segment without a
+	// leading separator.
+	const sep = "/"
+	goal := strings.Count(name, sep) + 2
+	i := len(file)
+	for n := 0; n < goal; n++ {
+		i = strings.LastIndex(file[:i], sep)
+		if i == -1 {
+			// not enough separators found, set i so that the slice expression
+			// below leaves file unmodified
+			i = -len(sep)
+			break
 		}
 	}
-
-	return stackTrace
+	// get back to 0 or trim the leading separator
+	file = file[i+len(sep):]
+	return file
 }

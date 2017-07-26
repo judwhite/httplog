@@ -11,8 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 // Server provides functionality for:
@@ -108,12 +106,11 @@ func (svr *Server) Handle(handler Handler) func(w http.ResponseWriter, r *http.R
 				status = http.StatusInternalServerError
 				w.WriteHeader(status)
 
-				perror, ok := perr.(error)
-				if !ok {
-					perror = fmt.Errorf("%v", perr)
+				var ok bool
+				if err, ok = perr.(error); !ok {
+					err = fmt.Errorf("%v", perr)
 				}
-
-				err = errors.WithStack(perror)
+				err = withStack(err)
 			}
 
 			go WriteHTTPLog(handler.Name, requestLogger, r, start, status, bytesSent, err)
@@ -133,6 +130,7 @@ func (svr *Server) Handle(handler Handler) func(w http.ResponseWriter, r *http.R
 		atomic.AddInt32(&svr.openConnections, 1)
 
 		httpResponse, err := handler.Func(r, requestLogger)
+		err = withStack(err)
 
 		resp := httpResponse.Body
 		status = httpResponse.Status
@@ -160,10 +158,8 @@ func (svr *Server) Handle(handler Handler) func(w http.ResponseWriter, r *http.R
 					body, marshalErr = json.Marshal(resp)
 				}
 				if marshalErr != nil {
-					if err != nil {
-						err = errors.Wrap(err, fmt.Sprintf("json.Marshal:%s", marshalErr))
-					} else {
-						err = errors.Wrap(marshalErr, "json.Marshal")
+					if err == nil {
+						err = marshalErr
 					}
 					status = http.StatusInternalServerError
 				} else {
@@ -176,10 +172,8 @@ func (svr *Server) Handle(handler Handler) func(w http.ResponseWriter, r *http.R
 			if body != nil {
 				_, writeBodyErr := w.Write(body)
 				if writeBodyErr != nil {
-					if err != nil {
-						err = errors.Wrap(err, fmt.Sprintf("http.ResponseWriter.Write:%s", writeBodyErr))
-					} else {
-						err = errors.Wrap(writeBodyErr, "http.ResponseWriter.Write")
+					if err == nil {
+						err = writeBodyErr
 					}
 				} else {
 					bytesSent = len(body)
