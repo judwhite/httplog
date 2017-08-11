@@ -1,8 +1,11 @@
 package httplog
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -31,13 +34,28 @@ type Server struct {
 	// to complete before the Shutdown method returns. The default is 30s.
 	ShutdownTimeout time.Duration
 	// FormatJSON determines whether non-byte and non-string responses are
-	// formatted with MarshalIndent (when true) or Marshal (when false. The
+	// formatted with MarshalIndent (when true) or Marshal (when false). The
 	// default is false.
 	FormatJSON bool
 	// NewLogEntry is a "func() Entry" field. Set this property to specify
 	// how new log entries are created. This field must be set to integrate
 	// with an outside logging package.
 	NewLogEntry func() Entry
+}
+
+const gzipMinLength = 1000
+const gzipCompLevel = gzip.DefaultCompression
+
+var gzipTypes = map[string]bool{
+	"application/javascript": true,
+	"application/json":       true,
+	"application/xml":        true,
+	"font/opentype":          true,
+	"image/svg+xml":          true,
+	"image/x-icon":           true,
+	"text/css":               true,
+	"text/html":              true,
+	"text/plain":             true,
 }
 
 // Entry is implemented by a log entry.
@@ -59,7 +77,7 @@ type Handler struct {
 	Func loggedHandler
 }
 
-type loggedHandler func(r *http.Request, requestLogger Entry) (Response, error)
+type loggedHandler func(r *http.Request, entry Entry) (Response, error)
 
 // Response contains the body, status, and HTTP headers to return.
 type Response struct {
@@ -96,7 +114,7 @@ func (svr *Server) Handle(handler Handler) func(w http.ResponseWriter, r *http.R
 		bytesSent := 0
 		status := 0
 		start := time.Now()
-		requestLogger := svr.newEntry()
+		logEntry := svr.newEntry()
 
 		var decOpenConnections bool
 		var err error
@@ -107,13 +125,21 @@ func (svr *Server) Handle(handler Handler) func(w http.ResponseWriter, r *http.R
 				w.WriteHeader(status)
 
 				var ok bool
-				if err, ok = perr.(error); !ok {
-					err = fmt.Errorf("%v", perr)
+				var panicErr error
+				if panicErr, ok = perr.(error); !ok {
+					panicErr = fmt.Errorf("%v", perr)
 				}
-				err = withStack(err)
+				panicErr = withStack(panicErr)
+				if err == nil {
+					err = panicErr
+				} else {
+					// TODO (judwhite): wipes stack trace. add method for adding multiple errors.
+					err = fmt.Errorf("handler: %v\npanic: %v", err.Error(), panicErr.Error())
+				}
 			}
 
-			go WriteHTTPLog(handler.Name, requestLogger, r, start, status, bytesSent, err)
+			duration := time.Since(start)
+			go WriteHTTPLog(handler.Name, logEntry, r, duration, status, bytesSent, err)
 
 			if decOpenConnections {
 				atomic.AddInt32(&svr.openConnections, -1)
@@ -129,7 +155,7 @@ func (svr *Server) Handle(handler Handler) func(w http.ResponseWriter, r *http.R
 		decOpenConnections = true
 		atomic.AddInt32(&svr.openConnections, 1)
 
-		httpResponse, err := handler.Func(r, requestLogger)
+		httpResponse, err := handler.Func(r, logEntry)
 		err = withStack(err)
 
 		resp := httpResponse.Body
@@ -144,45 +170,99 @@ func (svr *Server) Handle(handler Handler) func(w http.ResponseWriter, r *http.R
 			w.Header().Add(hdr.Name, hdr.Value)
 		}
 
-		if resp != nil {
-			var body []byte
-			if respString, ok := resp.(string); ok {
-				body = []byte(respString)
-			} else if respBytes, ok := resp.([]byte); ok {
-				body = respBytes
-			} else {
-				var marshalErr error
-				if svr.FormatJSON {
-					body, marshalErr = json.MarshalIndent(resp, "", "  ")
-				} else {
-					body, marshalErr = json.Marshal(resp)
-				}
-				if marshalErr != nil {
-					if err == nil {
-						err = marshalErr
-					}
-					status = http.StatusInternalServerError
-				} else {
-					w.Header().Add("Content-Type", "application/json")
-				}
-			}
-
+		if resp == nil {
 			w.WriteHeader(status)
+			return
+		}
 
-			if body != nil {
-				_, writeBodyErr := w.Write(body)
-				if writeBodyErr != nil {
-					if err == nil {
-						err = writeBodyErr
-					}
-				} else {
-					bytesSent = len(body)
-				}
+		var body []byte
+		if respString, ok := resp.(string); ok {
+			body = []byte(respString)
+			if w.Header().Get("Content-Type") == "" {
+				w.Header().Set("Content-Type", "text/plain")
 			}
+		} else if respBytes, ok := resp.([]byte); ok {
+			body = respBytes
 		} else {
+			var marshalErr error
+			if svr.FormatJSON {
+				body, marshalErr = json.MarshalIndent(resp, "", "  ")
+			} else {
+				body, marshalErr = json.Marshal(resp)
+			}
+			if marshalErr != nil {
+				panic(marshalErr)
+			}
+			w.Header().Set("Content-Type", "application/json")
+		}
+
+		if len(body) == 0 {
 			w.WriteHeader(status)
+			return
+		}
+
+		bodyHasGzipMagicHeader := len(body) > 1 && body[0] == 0x1f && body[1] == 0x8b
+
+		writeBody := func() (int, error) {
+			return w.Write(body)
+		}
+
+		gzipOK := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
+		if bodyHasGzipMagicHeader {
+			if !gzipOK {
+				w.Header().Del("Content-Encoding")
+
+				buf := bytes.NewBuffer(body)
+				reader, newReaderErr := gzip.NewReader(buf)
+				if newReaderErr != nil {
+					panic(newReaderErr)
+				}
+				writeBody = func() (int, error) {
+					n, localErr := io.Copy(w, reader)
+					closeErr := reader.Close()
+					if localErr == nil && closeErr != nil {
+						localErr = closeErr
+					}
+					return int(n), localErr
+				}
+			} else {
+				w.Header().Set("Content-Encoding", "gzip")
+			}
+		} else if gzipOK && len(body) > gzipMinLength && gzipTypes[w.Header().Get("Content-Type")] {
+			w.Header().Set("Content-Encoding", "gzip")
+
+			wc := &writeCounter{writer: w}
+			gzipWriter, newWriterErr := gzip.NewWriterLevel(wc, gzipCompLevel)
+			if newWriterErr != nil {
+				panic(newWriterErr)
+			}
+			writeBody = func() (int, error) {
+				_, localErr := gzipWriter.Write(body)
+				closeErr := gzipWriter.Close()
+				if localErr == nil && closeErr != nil {
+					localErr = closeErr
+				}
+				return wc.count, localErr
+			}
+		}
+
+		n, writeBodyErr := writeBody()
+		bytesSent = n
+		if writeBodyErr != nil {
+			panic(writeBodyErr)
 		}
 	}
+}
+
+type writeCounter struct {
+	writer io.Writer
+	count  int
+}
+
+func (c *writeCounter) Write(p []byte) (int, error) {
+	n, err := c.writer.Write(p)
+	c.count += n
+	return n, err
 }
 
 // Shutdown attempts a graceful shutdown, waiting for outstanding connections
@@ -246,8 +326,8 @@ func (svr *Server) newEntry() Entry {
 //   status >= 500         Error
 //
 // This function is invoked by Server's Handle method.
-func WriteHTTPLog(handlerName string, entry Entry, r *http.Request, start time.Time, status int, bytesSent int, err error) {
-	timeTakenSecs := float64(time.Since(start)) / 1e9
+func WriteHTTPLog(handlerName string, entry Entry, r *http.Request, duration time.Duration, status int, bytesSent int, err error) {
+	timeTakenSecs := float64(duration) / 1e9
 
 	labelValues := []string{strconv.Itoa(status), handlerName, r.Method}
 	httpRequestsTotal.WithLabelValues(labelValues...).Inc()
