@@ -246,6 +246,7 @@ func (svr *Server) Handle(handler Handler) func(w http.ResponseWriter, r *http.R
 			}
 		}
 
+		w.WriteHeader(status)
 		n, writeBodyErr := writeBody()
 		bytesSent = n
 		if writeBodyErr != nil {
