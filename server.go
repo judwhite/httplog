@@ -335,11 +335,22 @@ func WriteHTTPLog(handlerName string, entry Entry, r *http.Request, duration tim
 	httpRequestDurationCounter.WithLabelValues(labelValues...).Observe(timeTakenSecs)
 
 	var host string
-	ip, _, splitErr := net.SplitHostPort(r.RemoteAddr)
-	if splitErr != nil {
-		ip = r.RemoteAddr
-		host = r.RemoteAddr
-	} else {
+
+	ip := r.Header.Get("X-Real-IP")
+	if ip == "" {
+		forwardedFor := r.Header.Get("X-Forwarded-For")
+		ip = strings.SplitN(forwardedFor, ",", 2)[0]
+		if ip == "" {
+			var splitErr error
+			ip, _, splitErr = net.SplitHostPort(r.RemoteAddr)
+			if splitErr != nil {
+				ip = r.RemoteAddr
+				host = r.RemoteAddr
+			}
+		}
+	}
+
+	if host == "" {
 		host = getHostFromIP(ip)
 	}
 
